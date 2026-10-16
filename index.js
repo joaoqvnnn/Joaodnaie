@@ -13,15 +13,14 @@ const path = require('path');
 // CONFIGURAÇÕES — EDITE AQUI
 // ============================================================
 const CONFIG = {
-  // Número do dono (com DDI e DDD, sem +, sem espaços)
-  // Ex: '5511999999999'
-  NUMERO_DONO: '5511999999999',
+  // O número será puxado automaticamente das variáveis do Render
+  // Se não achar, ele tenta usar o número abaixo (troque pelo seu)
+  NUMERO_DONO: process.env.NUMERO_DONO || '5511999999999',
 
   // Nome do bot (aparece nas mensagens)
   NOME_BOT: '🛡️ AntiNuke Bot',
 
   // Grupos onde a proteção está ATIVA (JIDs)
-  // Ex: ['120363123456789@g.us']
   // Deixe vazio [] para proteger TODOS os grupos que o bot participar
   GRUPOS_PROTEGIDOS: [],
 
@@ -42,7 +41,6 @@ const PORT = process.env.PORT || 3000;
 const groupCache = new Map();
 
 // Registro de ações por usuário (para detectar rajadas)
-// { jid: { demotes: [], promotes: [], removes: [] } }
 const registroAcoes = new Map();
 
 // ============================================================
@@ -87,7 +85,6 @@ async function iniciarBot() {
   const sock = makeWASocket({
     version,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
     auth: state,
     browser: ['AntiNuke Bot', 'Chrome', '1.0.0'],
     generateHighQualityLinkPreview: false,
@@ -97,10 +94,26 @@ async function iniciarBot() {
   sock.ev.on('creds.update', saveCreds);
 
   // ==========================================================
-  // CONEXÃO
+  // CONEXÃO E CÓDIGO DE PAREAMENTO
   // ==========================================================
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, lastDisconnect, qr } = update;
+
+    // Gera o código de pareamento se o QR for solicitado
+    if (qr) {
+      try {
+        // Espera 2 segundos para garantir que o socket esteja pronto
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        const numero = CONFIG.NUMERO_DONO;
+        const codigo = await sock.requestPairingCode(numero);
+        
+        log(`🔑 SEU CÓDIGO DE PAREAMENTO É: ${codigo}`);
+        log(`📱 Abra o WhatsApp no seu celular > Dispositivos Conectados > Conectar com número de telefone > Digite o código acima.`);
+      } catch (e) {
+        log(`❌ Erro ao gerar código de pareamento: ${e.message}`);
+      }
+    }
 
     if (connection === 'close') {
       const shouldReconnect =
@@ -118,7 +131,7 @@ async function iniciarBot() {
       // Envia mensagem de boas-vindas ao dono
       try {
         await sock.sendMessage(`${CONFIG.NUMERO_DONO}@s.whatsapp.net`, {
-          text: `${CONFIG.NOME_BOT} está online! 🛡️\n\nProteção anti-nuke ativada.\nGrupos protegidos: ${CONFIG.GRUPOS_PROTEGIDOS.length === 0 ? 'TODOS' : CONFIG.GRUPOS_PROTEGIDOS.join(', ')}`,
+          text: `${CONFIG.NOME_BOT} está online! 🛡️\n\nProteção anti-nuke ativada.`,
         });
       } catch (e) {
         log('⚠️ Não foi possível enviar mensagem ao dono: ' + e.message);
@@ -133,32 +146,22 @@ async function iniciarBot() {
     try {
       const { id: groupJid, participants, action, author } = update;
 
-      // Ignora se o grupo não é protegido
       if (!grupoEhProtegido(groupJid)) return;
-
-      // Ignora se a ação foi feita pelo DONO (ele pode tudo)
       if (ehDono(author)) return;
-
-      // Ignora se o autor é o próprio bot
       if (author === sock.user.id) return;
 
-      // Obtém metadados atualizados do grupo
       const metadata = await sock.groupMetadata(groupJid);
       groupCache.set(groupJid, metadata);
 
-      // Verifica se o bot é ADM no grupo (necessário para banir)
       const botParticipante = metadata.participants.find(
         (p) => p.id === sock.user.id
       );
       const botEhAdmin = botParticipante?.admin === 'admin' ||
                          botParticipante?.admin === 'superadmin';
 
-      // ==========================================================
-      // 🚨 DETECÇÃO 1: Alguém tentou SE PROMOVER a ADM
-      // ==========================================================
+      // 🚨 DETECÇÃO 1: AUTO-PROMOÇÃO
       if (action === 'promote') {
         for (const participante of participants) {
-          // O autor promoveu a si mesmo?
           if (autorPromoveuASiMesmo(author, participante)) {
             log(`🚨 AUTO-PROMOÇÃO detectada! ${author} se promoveu em ${groupJid}`);
             await banirDoGrupo(sock, groupJid, [author], botEhAdmin);
@@ -169,23 +172,16 @@ async function iniciarBot() {
         }
       }
 
-      // ==========================================================
-      // 🚨 DETECÇÃO 2: Alguém tentou REBAIXAR (demote) um ADM
-      // ==========================================================
+      // 🚨 DETECÇÃO 2: DEMOTE INDEVIDO
       if (action === 'demote') {
         for (const participante of participants) {
-          // Verifica se o alvo era ADM
           const alvo = metadata.participants.find((p) => p.id === participante);
           if (!alvo) continue;
 
-          // O autor NÃO é o dono e está rebaixando outro ADM?
           if (alvo.admin && !ehDono(author)) {
             log(`🚨 DEMOTE INDEVIDO! ${author} rebaixou ${participante} em ${groupJid}`);
-
-            // Registra a ação para detectar rajada
             registrarAcao(author, 'demotes');
 
-            // Tenta reverter o demote
             if (botEhAdmin) {
               try {
                 await sock.groupParticipantsUpdate(groupJid, [participante], 'promote');
@@ -195,33 +191,23 @@ async function iniciarBot() {
               }
             }
 
-            // Bane o autor do demote
             await banirDoGrupo(sock, groupJid, [author], botEhAdmin);
             await notificarDono(sock, groupJid, author, 'DEMOTE INDEVIDO',
               `Tentou rebaixar o ADM ${participante}.`);
-
-            // Verifica rajada
             await verificarRajada(sock, groupJid, author, botEhAdmin);
             return;
           }
         }
       }
 
-      // ==========================================================
-      // 🚨 DETECÇÃO 3: NUKE — Muitas remoções em sequência
-      // ==========================================================
+      // 🚨 DETECÇÃO 3: NUKE (Rajada de remoções)
       if (action === 'remove') {
         registrarAcao(author, 'removes');
-
-        // Verifica se é uma rajada (nuke)
         await verificarRajada(sock, groupJid, author, botEhAdmin);
       }
 
-      // ==========================================================
-      // 🚨 DETECÇÃO 4: Adição suspeita (bots/adicionar em massa)
-      // ==========================================================
+      // 🚨 DETECÇÃO 4: ADIÇÃO EM MASSA
       if (action === 'add') {
-        // Se alguém adicionou 3+ pessoas de uma vez sem ser dono
         if (participants.length >= 3 && !ehDono(author)) {
           log(`🚨 ADIÇÃO EM MASSA! ${author} adicionou ${participants.length} pessoas em ${groupJid}`);
           await banirDoGrupo(sock, groupJid, [author], botEhAdmin);
@@ -255,7 +241,6 @@ async function iniciarBot() {
         const texto = extrairTexto(msg);
         if (!texto) continue;
 
-        // Detecta comandos de "nuke" ou "ban all"
         const padroesNuke = [
           /\.?nuke/i,
           /\.?ban\s*all/i,
@@ -288,7 +273,6 @@ async function iniciarBot() {
 
 function autorPromoveuASiMesmo(author, participante) {
   if (!author || !participante) return false;
-  // author = quem fez a ação, participante = quem foi promovido
   const authorNum = author.split('@')[0].split(':')[0];
   const partNum = participante.split('@')[0].split(':')[0];
   return authorNum === partNum;
@@ -302,14 +286,10 @@ async function banirDoGrupo(sock, groupJid, jids, botEhAdmin) {
 
   for (const jid of jids) {
     try {
-      // 1. Remove do grupo
       await sock.groupParticipantsUpdate(groupJid, [jid], 'remove');
       log(`🔨 ${jid} foi REMOVIDO do grupo ${groupJid}.`);
-
-      // 2. Bloqueia o usuário
       await sock.updateBlockStatus(jid, 'block');
       log(`🚫 ${jid} foi BLOQUEADO.`);
-
     } catch (e) {
       log(`❌ Erro ao banir ${jid}: ${e.message}`);
     }
