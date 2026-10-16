@@ -6,15 +6,12 @@ const {
 } = require('@whiskeysockets/baileys');
 const express = require('express');
 const pino = require('pino');
-const fs = require('fs');
-const path = require('path');
 
 // ============================================================
 // CONFIGURAÇÕES — EDITE AQUI
 // ============================================================
 const CONFIG = {
   // O número será puxado automaticamente das variáveis do Render
-  // Se não achar, ele tenta usar o número abaixo (troque pelo seu)
   NUMERO_DONO: process.env.NUMERO_DONO || '5511999999999',
 
   // Nome do bot (aparece nas mensagens)
@@ -96,20 +93,23 @@ async function iniciarBot() {
   // ==========================================================
   // CONEXÃO E CÓDIGO DE PAREAMENTO
   // ==========================================================
+  let codigoGerado = false; // Evita pedir código repetido (causa bloqueio no WhatsApp)
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Gera o código de pareamento se o QR for solicitado
-    if (qr) {
+    // Gera o código de pareamento APENAS UMA VEZ
+    if (qr && !codigoGerado) {
+      codigoGerado = true;
       try {
-        // Espera 2 segundos para garantir que o socket esteja pronto
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Espera 3 segundos para garantir que o socket esteja pronto
+        await new Promise(resolve => setTimeout(resolve, 3000));
         
         const numero = CONFIG.NUMERO_DONO;
         const codigo = await sock.requestPairingCode(numero);
         
         log(`🔑 SEU CÓDIGO DE PAREAMENTO É: ${codigo}`);
-        log(`📱 Abra o WhatsApp no seu celular > Dispositivos Conectados > Conectar com número de telefone > Digite o código acima.`);
+        log(`📱 Abra o WhatsApp no celular > Dispositivos Conectados > Conectar com número de telefone > Digite o código AGORA.`);
       } catch (e) {
         log(`❌ Erro ao gerar código de pareamento: ${e.message}`);
       }
@@ -120,6 +120,7 @@ async function iniciarBot() {
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) {
         log('🔄 Reconectando...');
+        codigoGerado = false; // Permite gerar novo código se cair
         iniciarBot();
       } else {
         log('❌ Sessão encerrada. Apague a pasta ./sessao e reinicie.');
