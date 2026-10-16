@@ -1,0 +1,15 @@
+{
+  "name": "whatsapp-antinuke-bot",
+  "version": "1.0.0",
+  "description": "Bot de protecao anti-nuke para WhatsApp",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "express": "^4.19.2",
+    "pino": "^9.2.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
